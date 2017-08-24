@@ -46,14 +46,15 @@ class Dataset:
         ims = tf.cast(ims, tf.int32)
         ims = tf.image.resize_images(ims, [self.height, self.width])
         ims = (ims / 128.0) - 1.0
-        ims2 = tf.image.flip_left_right(ims)
-        # ims = tf.concat(ims, tf.image.flip_left_right(ims))
+        ims = tf.stack([ims, tf.image.flip_left_right(ims)])
+
         min_after_dequeue = 100
         capacity = min_after_dequeue + 3 * self.batch_size
-        self.ims, self.ims2 = tf.train.shuffle_batch([ims, ims2],
-                                                     batch_size=self.batch_size,
-                                                     min_after_dequeue=min_after_dequeue,
-                                                     capacity=capacity)
+        self.ims = tf.train.shuffle_batch([ims],
+                                          batch_size=self.batch_size,
+                                          min_after_dequeue=min_after_dequeue,
+                                          capacity=capacity,
+                                          enqueue_many=True)
 
 
 def linear(x, units, activation=tf.nn.elu, name=None, bn=True):
@@ -89,9 +90,9 @@ def generator(x, reuse=False):
         if reuse:
             scope.reuse_variables()
         net = x  # batch_size x 100
-        net = linear(net,   1024 * 16, name="gf1")
-        net = linear(net,  256 * 16, name="gf2")
-        net = linear(net,  128 * 16, name="gf3")
+        net = linear(net, 1024 * 16, name="gf1")
+        net = linear(net, 256 * 16, name="gf2")
+        net = linear(net, 128 * 16, name="gf3")
         net = linear(net, 96 * 96 * 3, name="gf4", bn=False)
         net = tf.nn.tanh(net)
         net = tf.reshape(net, (-1, 96, 96, 3))
@@ -111,9 +112,9 @@ def discriminator(x, reuse=False):
 
         net = tf.reshape(x, (-1, 96 * 96 * 3))
         net = linear(net, 96 * 96 * 3, name="df1", bn=False)
-        net = linear(net,  128 * 16, name="df2")
-        net = linear(net,  256 * 16, name="df3")
-        net = linear(net,     100, name="df4")
+        net = linear(net, 128 * 16, name="df2")
+        net = linear(net, 256 * 16, name="df3")
+        net = linear(net, 100, name="df4")
         net = tf.nn.sigmoid(net)
         # net = conv_layer(x,    128, (5, 5), (2, 2), "SAME", "dc1")
         # net = conv_layer(net,  256, (5, 5), (2, 2), "SAME", "dc2")
@@ -134,7 +135,9 @@ with tf.Session() as sess:
     noise_placeholder = tf.placeholder(tf.float32, shape=[FLAGS.batch_size, 100], name="noise")
     real_placeholder = tf.placeholder(tf.float32, shape=[FLAGS.batch_size, 96, 96, 3], name="real")
 
-    d_fake = discriminator(generator(noise_placeholder))
+    generated = generator(noise_placeholder)
+    tf.summary.image("generated", generated)
+    d_fake = discriminator(generated)
     d_real = discriminator(real_placeholder, reuse=True)
 
     d_loss_real = tf.reduce_mean(
@@ -143,38 +146,45 @@ with tf.Session() as sess:
     d_loss_fake = tf.reduce_mean(
         tf.nn.sigmoid_cross_entropy_with_logits(logits=d_fake, labels=tf.zeros_like(d_fake))
     )
+    d_loss = d_loss_real + d_loss_fake
     g_loss = tf.reduce_mean(
         tf.nn.sigmoid_cross_entropy_with_logits(logits=d_fake, labels=tf.zeros_like(d_fake))
     )
-    d_loss = d_loss_real + d_loss_fake
-    # tf.summary.scalar("d_real", d_loss_real)
-    # tf.summary.scalar("d_fake", d_loss_fake)
-    # tf.summray.scalar("d_total", d_loss)
-    # tf.summary.scalar("g", g_loss)
+    tf.summary.scalar("d_real", d_loss_real)
+    tf.summary.scalar("d_fake", d_loss_fake)
+    tf.summary.scalar("d_total", d_loss)
+    tf.summary.scalar("g", g_loss)
 
     g_vars = [var for var in tf.trainable_variables() if "g" in var.name]
     d_vars = [var for var in tf.trainable_variables() if "d" in var.name]
 
     g_opt = tf.train.AdamOptimizer(FLAGS.learning_rate).minimize(g_loss, var_list=g_vars)
     d_opt = tf.train.AdamOptimizer(FLAGS.learning_rate).minimize(d_loss, var_list=d_vars)
+
     print("initializing variables")
+    summary_op = tf.summary.merge_all()
+    summary_writer = tf.summary.FileWriter(FLAGS.model_dir, sess.graph)
     tf.global_variables_initializer().run()
+
     print("starting queue runners")
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+
     print("starting training loop")
     show_all_variables()
-    try:
-        for i in range(FLAGS.iterations + 1):
-            noise = np.random.normal(size=(FLAGS.batch_size, 100))
-            ims = data.ims.eval()
-            _, d_loss_ = sess.run([d_opt, d_loss], {real_placeholder: ims,
-                                                    noise_placeholder: noise})
-            _, g_loss_ = sess.run([g_opt, g_loss], {real_placeholder: ims,
-                                                    noise_placeholder: noise})
-            # val = sess.run(output, {placeholder: data.ims.eval()})
-            print("Step {:<7d} - G loss {:.2f} - D loss {:.2f}".format(i, g_loss_, d_loss_))
-    except Exception as e:
-        print(e)
-        coord.request_stop()
-        coord.join(threads)
+
+    for i in range(FLAGS.iterations + 1):
+        noise = np.random.normal(size=(FLAGS.batch_size, 100))
+        ims = data.ims.eval()
+        _, d_loss_ = sess.run([d_opt, d_loss], {real_placeholder: ims,
+                                                noise_placeholder: noise})
+
+        _, g_loss_, g_summary = sess.run([g_opt, g_loss, summary_op], {real_placeholder: ims,
+                                                                       noise_placeholder: noise})
+        # val = sess.run(output, {placeholder: data.ims.eval()})
+        print("Step {:<7d} - G loss {:.2f} - D loss {:.2f}".format(i, g_loss_, d_loss_))
+        if i % 2 == 0:
+            summary_writer.add_summary(g_summary, i)
+
+    coord.request_stop()
+    coord.join(threads)
