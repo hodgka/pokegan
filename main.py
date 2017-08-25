@@ -92,12 +92,13 @@ def generator(x, reuse=False):
         if reuse:
             scope.reuse_variables()
         net = tf.reshape(x, (FLAGS.batch_size, -1))
-        net = linear(net, 1024 * 16, name="gf1", bn=False)
-        net = tf.reshape(net, (-1, 4, 4, 1024))
-        net = deconv(net, 512, (3, 3), (2, 2), name="gd1", bn=False)
-        net = deconv(net, 256, (5, 5), (2, 2), name="gd2")
-        net = deconv(net, 128, (5, 5), (2, 2), name="gd3")
-        net = deconv(net, 3, (5, 5), (2, 2), name="gd4", activation=tf.nn.tanh)
+        net = linear(net, 2048 * 16, name="gf1", bn=False)
+        net = tf.reshape(net, (-1, 4, 4, 2048))
+        net = deconv(net, 1024, (3, 3), (2, 2), name="gd1", bn=False)
+        net = deconv(net, 512, (5, 5), (2, 2), name="gd2")
+        net = deconv(net, 256, (5, 5), (2, 2), name="gd3")
+        net = deconv(net, 128, (5, 5), (2, 2), name="gd4")
+        net = deconv(net, 3, (5, 5), (2, 2), name="gd5", activation=tf.nn.tanh)
         net = tf.reshape(net, (-1, 96, 96, 3))
 
         return net
@@ -107,14 +108,14 @@ def discriminator(x, reuse=False):
     with tf.variable_scope("discriminator") as scope:
         if reuse:
             scope.reuse_variables()
-
-        net = tf.reshape(x, (-1, 96 * 96 * 3))
+        net = x
+        print(net)
         net = conv(net, 128, (5, 5), (2, 2), name="dc1", activation=tf.nn.elu, bn=False)
         net = conv(net, 256, (5, 5), (2, 2), name="dc2", activation=tf.nn.elu)
         net = conv(net, 512, (5, 5), (2, 2), name="dc3", activation=tf.nn.elu)
         net = conv(net, 1024, (3, 3), (2, 2), name="dc4", activation=tf.nn.elu)
         net = tf.reshape(net, (FLAGS.batch_size, -1))  # flatten bxhxwxc->bx(hwc)
-        net = linear(net, 1, activation=tf.nn.sigmoid)
+        net = linear(net, 1, activation=tf.nn.sigmoid, name="df1")
         return net
 
 
