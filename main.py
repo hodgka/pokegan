@@ -69,18 +69,20 @@ def linear(x, units, activation=tf.nn.elu, name=None, bn=True):
         return output
 
 
-def deconv_layer(x, filters, kernel, strides, padding, name, activation=tf.nn.relu):
+def deconv(x, filters, kernel, strides=(2, 2), padding="SAME", name=None, activation=tf.nn.relu, bn=True):
     with tf.variable_scope(name):
         output = tf.layers.conv2d_transpose(x, filters, kernel, strides, padding)
-        output = tf.layers.batch_normalization(output)
+        if bn:
+            output = tf.layers.batch_normalization(output)
         output = activation(output)
         return output
 
 
-def conv_layer(x, filters, kernel, strides, padding, name, activation=tf.nn.elu):
+def conv(x, filters, kernel, strides=(1, 1), padding="SAME", name=None, activation=tf.nn.elu, bn=True):
     with tf.variable_scope(name):
         output = tf.layers.conv2d(x, filters, kernel, strides, padding)
-        output = tf.layers.batch_normalization(output)
+        if bn:
+            output = tf.layers.batch_normalization(output)
         output = activation(output)
         return output
 
@@ -89,18 +91,14 @@ def generator(x, reuse=False):
     with tf.variable_scope("generator") as scope:
         if reuse:
             scope.reuse_variables()
-        net = x  # batch_size x 100
-        net = linear(net, 1024 * 16, name="gf1")
-        net = linear(net, 256 * 16, name="gf2")
-        net = linear(net, 128 * 16, name="gf3")
-        net = linear(net, 96 * 96 * 3, name="gf4", bn=False)
-        net = tf.nn.tanh(net)
+        net = tf.reshape(x, (FLAGS.batch_size, -1))
+        net = linear(net, 1024 * 16, name="gf1", bn=False)
+        net = tf.reshape(net, (-1, 4, 4, 1024))
+        net = deconv(net, 512, (3, 3), (2, 2), name="gd1", bn=False)
+        net = deconv(net, 256, (5, 5), (2, 2), name="gd2")
+        net = deconv(net, 128, (5, 5), (2, 2), name="gd3")
+        net = deconv(net, 3, (5, 5), (2, 2), name="gd4", activation=tf.nn.tanh)
         net = tf.reshape(net, (-1, 96, 96, 3))
-        # net = tf.reshape(net, [-1, 4, 4, 1024])
-        # net = deconv_layer(net, 512, (3, 3), (2, 2), "SAME", "gd1")  # 8x8x512
-        # net = deconv_layer(net, 256, (5, 5), (2, 2), "SAME", "gd2")  # 16x16x256
-        # net = deconv_layer(net, 128, (5, 5), (2, 2), "SAME", "gd3")  # 32x32x128
-        # net = deconv_layer(net,   3, (5, 5), (2, 2), "SAME", "gd4", activation=tf.nn.tanh)  # 96x96x3
 
         return net
 
@@ -111,15 +109,12 @@ def discriminator(x, reuse=False):
             scope.reuse_variables()
 
         net = tf.reshape(x, (-1, 96 * 96 * 3))
-        net = linear(net, 96 * 96 * 3, name="df1", bn=False)
-        net = linear(net, 128 * 16, name="df2")
-        net = linear(net, 256 * 16, name="df3")
-        net = linear(net, 100, name="df4")
-        net = tf.nn.sigmoid(net)
-        # net = conv_layer(x,    128, (5, 5), (2, 2), "SAME", "dc1")
-        # net = conv_layer(net,  256, (5, 5), (2, 2), "SAME", "dc2")
-        # net = conv_layer(net,  512, (5, 5), (2, 2), "SAME", "dc3")
-        # net = conv_layer(net, 1024, (3, 3), (2, 2), "SAME", "dc4")
+        net = conv(net, 128, (5, 5), (2, 2), name="dc1", activation=tf.nn.elu, bn=False)
+        net = conv(net, 256, (5, 5), (2, 2), name="dc2", activation=tf.nn.elu)
+        net = conv(net, 512, (5, 5), (2, 2), name="dc3", activation=tf.nn.elu)
+        net = conv(net, 1024, (3, 3), (2, 2), name="dc4", activation=tf.nn.elu)
+        net = tf.reshape(net, (FLAGS.batch_size, -1))  # flatten bxhxwxc->bx(hwc)
+        net = linear(net, 1, activation=tf.nn.sigmoid)
         return net
 
 
@@ -161,16 +156,13 @@ with tf.Session() as sess:
     g_opt = tf.train.AdamOptimizer(FLAGS.learning_rate).minimize(g_loss, var_list=g_vars)
     d_opt = tf.train.AdamOptimizer(FLAGS.learning_rate).minimize(d_loss, var_list=d_vars)
 
-    print("initializing variables")
     summary_op = tf.summary.merge_all()
     summary_writer = tf.summary.FileWriter(FLAGS.model_dir, sess.graph)
     tf.global_variables_initializer().run()
 
-    print("starting queue runners")
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
-    print("starting training loop")
     show_all_variables()
 
     for i in range(FLAGS.iterations + 1):
