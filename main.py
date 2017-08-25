@@ -3,23 +3,25 @@ import os
 import numpy as np
 import tensorflow as tf
 
+from dataio import Dataset
+from layers import *
 from utils import pp, show_all_variables
 
-
 flags = tf.app.flags
-flags.DEFINE_integer("iterations", 5, "Epoch to train [1e5]")
+flags.DEFINE_integer("iterations", 1000, "Epoch to train [1e5]")
 flags.DEFINE_float("clipping", 0.01, "Clipping parameter c. [0.01]")
 flags.DEFINE_integer("n_d", 5, "Number of iterations to train the discriminator. [5]")
-flags.DEFINE_float("learning_rate", 1e-4, "Learning rate of for adam [1e-4]")
+flags.DEFINE_float("learning_rate", 1e-3, "Learning rate of for adam [1e-4]")
 flags.DEFINE_integer("batch_size", 32, "The size of batch images [32]")
 flags.DEFINE_integer("input_height", 96, "The size of image to use (will be center cropped). [96]")
 flags.DEFINE_integer("input_width", 96, "The size of image to use (will be center cropped). [96]")
 flags.DEFINE_integer("channels", 3, "Number of channels. [3]")
+flags.DEFINE_integer("g_train", 10, "Number of iterations to train the generator for. [5]")
 flags.DEFINE_integer("output_height", 96, "The size of the output images to produce [96]")
 flags.DEFINE_integer("output_width", 96, "The size of the output images to produce. [96]")
 flags.DEFINE_string("dataset", "pokemon", "The name of dataset [pokemon]")
 flags.DEFINE_string("input_fname_pattern", "*.png", "Glob pattern of filename of input images [*.png]")
-flags.DEFINE_string("model_dir", "model", "Directory name to save the checkpoints [model]")
+flags.DEFINE_string("model_dir", "fully_connected", "Directory name to save the checkpoints [fully_connected]")
 flags.DEFINE_string("sample_dir", "samples", "Directory name to save the image samples [samples]")
 flags.DEFINE_boolean("train", True, "True for training, False for testing [False]")
 flags.DEFINE_boolean("crop", True, "True for training, False for testing [False]")
@@ -31,69 +33,15 @@ np.random.seed(0)
 pp.pprint(FLAGS.__flags)
 
 
-class Dataset:
-    def __init__(self, config):
-        for k, v in config.items():
-            setattr(self, k, v)
-
-        basepath = '/Users/alec/datasets/pokemon/main-sprites/black-white/'
-        fnames = [basepath + fname for fname in os.listdir(basepath) if (('.png' in fname) and ('-' not in fname))]
-        fname_queue = tf.train.string_input_producer(fnames, shuffle=True)
-        image_reader = tf.WholeFileReader()
-        _, ims = image_reader.read(fname_queue)
-
-        ims = tf.image.decode_png(ims, self.channels)
-        ims = tf.cast(ims, tf.int32)
-        ims = tf.image.resize_images(ims, [self.height, self.width])
-        ims = (ims / 128.0) - 1.0
-        ims = tf.stack([ims, tf.image.flip_left_right(ims)])
-
-        min_after_dequeue = 100
-        capacity = min_after_dequeue + 3 * self.batch_size
-        self.ims = tf.train.shuffle_batch([ims],
-                                          batch_size=self.batch_size,
-                                          min_after_dequeue=min_after_dequeue,
-                                          capacity=capacity,
-                                          enqueue_many=True)
-
-
-def linear(x, units, activation=tf.nn.elu, name=None, bn=True):
-    with tf.variable_scope(name):
-        w = tf.get_variable("w", [x.get_shape().as_list()[-1], units], dtype=tf.float32,
-                            initializer=tf.glorot_normal_initializer())
-        b = tf.get_variable("b", [units], dtype=tf.float32, initializer=tf.constant_initializer(0.0))
-        output = tf.nn.xw_plus_b(x, w, b)
-        if bn:
-            output = tf.layers.batch_normalization(output)
-        output = activation(output)
-        return output
-
-
-def deconv_layer(x, filters, kernel, strides, padding, name, activation=tf.nn.relu):
-    with tf.variable_scope(name):
-        output = tf.layers.conv2d_transpose(x, filters, kernel, strides, padding)
-        output = tf.layers.batch_normalization(output)
-        output = activation(output)
-        return output
-
-
-def conv_layer(x, filters, kernel, strides, padding, name, activation=tf.nn.elu):
-    with tf.variable_scope(name):
-        output = tf.layers.conv2d(x, filters, kernel, strides, padding)
-        output = tf.layers.batch_normalization(output)
-        output = activation(output)
-        return output
-
-
 def generator(x, reuse=False):
     with tf.variable_scope("generator") as scope:
         if reuse:
             scope.reuse_variables()
         net = x  # batch_size x 100
-        net = linear(net, 1024 * 16, name="gf1")
-        net = linear(net, 256 * 16, name="gf2")
-        net = linear(net, 128 * 16, name="gf3")
-        net = linear(net, 96 * 96 * 3, name="gf4", bn=False)
+        net = linear(net, 512 * 16, name="genf1")
+        net = linear(net, 256 * 8, name="genf2")
+        net = linear(net, 128 * 8, name="genf3")
+        net = linear(net, 96 * 96 * 3, name="genf4", bn=False)
         net = tf.nn.tanh(net)
         net = tf.reshape(net, (-1, 96, 96, 3))
         # net = tf.reshape(net, [-1, 4, 4, 1024])
@@ -111,10 +59,10 @@ def discriminator(x, reuse=False):
             scope.reuse_variables()
 
         net = tf.reshape(x, (-1, 96 * 96 * 3))
-        net = linear(net, 96 * 96 * 3, name="df1", bn=False)
-        net = linear(net, 128 * 16, name="df2")
-        net = linear(net, 256 * 16, name="df3")
-        net = linear(net, 100, name="df4")
+        # net = linear(net, 128, name="df2")
+        net = linear(net, 256, name="discf1")
+        net = linear(net, 100, name="discf2")
+        net = linear(net, 100, name="discf3")
         net = tf.nn.sigmoid(net)
         # net = conv_layer(x,    128, (5, 5), (2, 2), "SAME", "dc1")
         # net = conv_layer(net,  256, (5, 5), (2, 2), "SAME", "dc2")
@@ -123,9 +71,15 @@ def discriminator(x, reuse=False):
         return net
 
 
-with tf.Session() as sess:
+run_config = tf.ConfigProto()
+run_config.allow_soft_placement = True
+run_config.gpu_options.allow_growth = True
+run_config.gpu_options.per_process_gpu_memory_fraction = 0.8
+
+with tf.Session(config=run_config) as sess:
     print("creating dataset")
-    data = Dataset({"batch_size": FLAGS.batch_size,
+    data = Dataset({"dataset": "pokemon_sprites",
+                    "batch_size": FLAGS.batch_size,
                     "height": FLAGS.input_height,
                     "width": FLAGS.input_width,
                     "channels": FLAGS.channels,
@@ -155,8 +109,12 @@ with tf.Session() as sess:
     tf.summary.scalar("d_total", d_loss)
     tf.summary.scalar("g", g_loss)
 
-    g_vars = [var for var in tf.trainable_variables() if "g" in var.name]
-    d_vars = [var for var in tf.trainable_variables() if "d" in var.name]
+    g_vars = [var for var in tf.trainable_variables() if "gen" in var.name]
+    for var in g_vars:
+        tf.summary.histogram("G_" + var.name, var)
+    d_vars = [var for var in tf.trainable_variables() if "disc" in var.name]
+    for var in d_vars:
+        tf.summary.histogram("D_" + var.name, var)
 
     g_opt = tf.train.AdamOptimizer(FLAGS.learning_rate).minimize(g_loss, var_list=g_vars)
     d_opt = tf.train.AdamOptimizer(FLAGS.learning_rate).minimize(d_loss, var_list=d_vars)
@@ -176,15 +134,18 @@ with tf.Session() as sess:
     for i in range(FLAGS.iterations + 1):
         noise = np.random.normal(size=(FLAGS.batch_size, 100))
         ims = data.ims.eval()
+        for j in range(FLAGS.g_train):
+            _, g_loss_ = sess.run([g_opt, g_loss], {real_placeholder: ims,
+                                                    noise_placeholder: noise})
+        # val = sess.run(output, {placeholder: data.ims.eval()})
         _, d_loss_ = sess.run([d_opt, d_loss], {real_placeholder: ims,
                                                 noise_placeholder: noise})
 
-        _, g_loss_, g_summary = sess.run([g_opt, g_loss, summary_op], {real_placeholder: ims,
-                                                                       noise_placeholder: noise})
-        # val = sess.run(output, {placeholder: data.ims.eval()})
-        print("Step {:<7d} - G loss {:.2f} - D loss {:.2f}".format(i, g_loss_, d_loss_))
-        if i % 2 == 0:
-            summary_writer.add_summary(g_summary, i)
+        print("Step {:<7d} - G loss {} - D loss {}".format(i, g_loss_, d_loss_))
+        if i % 10 == 0:
+            summary = sess.run(summary_op, {real_placeholder: ims,
+                                            noise_placeholder: noise})
+            summary_writer.add_summary(summary, i)
 
     coord.request_stop()
     coord.join(threads)
